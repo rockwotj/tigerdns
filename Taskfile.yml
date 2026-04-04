@@ -1,0 +1,11 @@
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+
+version: '3'
+
+tasks:
+  build:
+    cmds:
+      - cargo +nightly build
+  run:
+    cmds:
+      - cargo +nightly run

@@ -1,6 +1,2 @@
 [build]
-target = "x86_64-unknown-linux-none"
-rustflags = ["-C", "relocation-model=static"]
-
-[unstable]
-build-std = ["core"]
+rustflags = ["-C", "link-arg=-lc"]

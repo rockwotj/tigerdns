@@ -9,14 +9,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "843867be96c8daad0d758b57df9392b6d8d271134fce549de6ce169ff98a92af"
 
 [[package]]
-name = "crabstyle"
-version = "0.1.0"
-dependencies = [
- "rustix",
- "syscalls",
-]
-
-[[package]]
 name = "errno"
 version = "0.3.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -52,10 +44,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustix-uring"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cb7155a60f3efeea81c75785fdadded9217e1940faa51441bf1e851b41e815f6"
+dependencies = [
+ "bitflags",
+ "rustix",
+]
+
+[[package]]
 name = "syscalls"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "81c645a4de0d803ced6ef0388a2646aa1ef8467173b5d59a2c33c88de4ab76e7"
+
+[[package]]
+name = "tigerdns"
+version = "0.1.0"
+dependencies = [
+ "rustix",
+ "rustix-uring",
+ "syscalls",
+]
 
 [[package]]
 name = "windows-link"

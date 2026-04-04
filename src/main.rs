@@ -8,6 +8,8 @@ use syscalls::syscall;
 
 use core::fmt::Write;
 
+mod udp;
+
 struct PanicWriter;
 
 impl Write for PanicWriter {
@@ -29,7 +31,7 @@ impl Write for PanicWriter {
 }
 
 #[panic_handler]
-fn panic(info: &core::panic::PanicInfo) -> ! {
+pub(crate) fn panic(info: &core::panic::PanicInfo) -> ! {
     let mut writer = PanicWriter;
     if let Some(location) = info.location() {
         let _ = write!(&mut writer, "panic: {} @ {}\n", info.message(), location);
@@ -38,6 +40,10 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
     }
     exit(101);
 }
+
+// With panic=abort this is never called, but the linker still needs the symbol.
+#[unsafe(no_mangle)]
+pub extern "C" fn rust_eh_personality() {}
 
 fn exit(code: i32) -> ! {
     #[cfg(target_arch = "x86_64")]
@@ -52,13 +58,13 @@ fn exit(code: i32) -> ! {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn _start() -> ! {
-    let exit_code = main();
-    exit(exit_code);
-}
-
-fn main() -> i32 {
-    let mut writer = PanicWriter;
-    let _ = write!(&mut writer, "hello, world!\n");
-    0
+pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
+    match udp::run() {
+        Ok(_) => 0,
+        Err(errno) => {
+            let mut w = PanicWriter;
+            let _ = write!(&mut w, "{}", errno);
+            1
+        }
+    }
 }
