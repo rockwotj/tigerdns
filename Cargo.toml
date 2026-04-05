@@ -3,13 +3,13 @@ name = "tigerdns"
 version = "0.1.0"
 edition = "2024"
 
-[dependencies]
-rustix = { version = "1.1.4", default-features = false, features = ["linux_5_11", "mm", "io_uring", "stdio", "thread"] }
-rustix-uring = "0.6.0"
-syscalls = { version = "0.8.1", default-features = false, features = ["aarch64", "x86_64"] }
-
 [profile.dev]
 panic = "abort"
 
 [profile.release]
 panic = "abort"
+
+[dependencies]
+bitflags = "2.11.0"
+io-uring = "0.7.11"
+libc = "0.2.184"

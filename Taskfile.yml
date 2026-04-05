@@ -2,10 +2,39 @@
 
 version: '3'
 
+vars:
+  BUILD_TYPE: debug
+
 tasks:
+  check:
+    aliases: [c]
+    platforms: [linux]
+    cmds:
+      - cmd: cargo +nightly check
   build:
+    aliases: [b]
+    platforms: [linux]
     cmds:
-      - cargo +nightly build
+      - cmd: cargo +nightly build
   run:
+    aliases: [r]
+    deps: [build]
+    platforms: [linux]
     cmds:
-      - cargo +nightly run
+      - cmd: cargo +nightly run
+  test:
+    aliases: [t, tests]
+    platforms: [linux]
+    cmds:
+      - cmd: cargo +nightly test
+
+  dev-container:
+    platforms: [darwin]
+    vars:
+      CONTAINER_EXISTS:
+        sh: container inspect tigerdns | jq 'length > 0'
+    cmds:
+      - if: '[ "{{.CONTAINER_EXISTS}}" = "true" ]'
+        cmd: container start -ia tigerdns
+      - if: '[ "{{.CONTAINER_EXISTS}}" = "false" ]'
+        cmd: container run -it -v ${PWD}:/app --publish 10053:10053/udp --name tigerdns -w /app rust

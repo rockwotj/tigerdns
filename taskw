@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+set -eu
+
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )";
+
+VERSION=3.49.1
+TASK_DIR="${SCRIPT_DIR}/target/tools"
+TASK="${TASK_DIR}/task"
+
+mkdir -p "$TASK_DIR"
+
+# If the correct version of task is installed already (is in PATH), use it instead of downloading.
+# This avoids obsolete downloads of task in CI, where we install it in Dockerfile.
+if command -v task > /dev/null  && [[ $(task --version) == "${VERSION}" ]]; then
+  TASK=$(which task)
+fi
+
+if [[ ! -x $TASK ]] || [[ $($TASK --version) != "${VERSION}" ]]; then
+  echo "--- updating task to v${VERSION}"
+  if ! sh -c "$(curl --retry 5 --retry-delay 0 --retry-max-time 60 --location https://raw.githubusercontent.com/go-task/task/refs/tags/v${VERSION}/install-task.sh)" -- -d -b "${TASK_DIR}" "v${VERSION}"; then
+    echo "--- primary source failed, falling back to taskfile.dev"
+    sh -c "$(curl --retry 5 --retry-delay 0 --retry-max-time 60 --location https://taskfile.dev/install.sh)" -- -d -b "${TASK_DIR}" "${VERSION}"
+  fi
+fi
+
+if ! command -v realpath &>/dev/null; then
+  echo "--- realpath command not found. Please install 'coreutils' package for your OS to continue. Exiting"
+  exit 1
+fi
+
+$TASK -d "$SCRIPT_DIR" "$@"
