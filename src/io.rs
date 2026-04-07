@@ -1,15 +1,15 @@
 use std::{
     cell::RefCell,
-    ffi::{CStr, c_void},
+    ffi::{c_void, CStr},
     io,
     pin::Pin,
 };
 
 use bitflags::bitflags;
-use io_uring::{IoUring, squeue, types::Fd};
+use io_uring::{squeue, types::Fd, IoUring};
 use libc;
 
-// Our internal abstraction around IOUring.
+/// Our internal abstraction around IOUring.
 pub struct IO {
     uring: RefCell<IoUring>,
 }
@@ -30,8 +30,8 @@ enum Operation<'io_op> {
     },
 }
 
-// The opaque memory needed for the operation. The caller should have this allocated and manage the
-// memory, but should not need to know the contents.
+/// The opaque memory needed for the operation. The caller should have this allocated and manage the
+/// memory, but should not need to know the contents.
 pub struct Completion<'io_op> {
     operation: Operation<'io_op>,
     context: *const c_void,
@@ -89,15 +89,25 @@ impl<'io_op> Completion<'io_op> {
 }
 
 bitflags! {
-    // Flags to pass to openat
+    /// Flags to pass to `openat`.
     pub struct OpenFlags: i32 {
+        /// Open for reading only.
         const RDONLY = libc::O_RDONLY;
+        /// Open for writing only.
         const WRONLY = libc::O_WRONLY;
+        /// Open for reading and writing.
+        const RDWR = libc::O_RDWR;
+        /// Create file if it does not exist.
         const CREAT  = libc::O_CREAT;
+        /// Truncate size to 0.
         const TRUNC  = libc::O_TRUNC;
+        /// Append on each write.
         const APPEND  = libc::O_APPEND;
+        /// Direct I/O.
         const DIRECT  = libc::O_DIRECT;
+        /// Error if O_CREAT and the file exists.
         const EXCL  = libc::O_EXCL;
+        /// Restrict open to a directory.
         const DIRECTORY  = libc::O_DIRECTORY;
     }
 }
@@ -128,7 +138,7 @@ impl<'a, T> ContextPtr for &'a T {
 }
 
 impl IO {
-    // Create a new ring
+    /// Creates a new `IO` instance with a new `io_uring` ring.
     pub fn new() -> Self {
         Self {
             uring: RefCell::new(IoUring::new(128).expect("iouring must be available")),
@@ -157,6 +167,7 @@ impl IO {
         Ok(())
     }
 
+    /// Submits an asynchronous `open` operation.
     pub fn open<'io_op, C: ContextPtr>(
         &self,
         context: C,
@@ -191,6 +202,9 @@ impl IO {
         }
     }
 
+    /// Submits an asynchronous `read` operation.
+    ///
+    /// Reads up to `buf.len()` bytes from the file descriptor `fd` at the specified `offset`.
     pub fn read<'io_op, C: ContextPtr>(
         &self,
         context: C,
@@ -226,6 +240,9 @@ impl IO {
         }
     }
 
+    /// Submits an asynchronous `close` operation.
+    ///
+    /// Deletes the descriptor from the per-process object reference table.
     pub fn close<'io_op, C: ContextPtr>(
         &self,
         context: C,
@@ -262,7 +279,7 @@ impl IO {
 
 #[cfg(test)]
 mod tests {
-    use std::pin::{Pin, pin};
+    use std::pin::{pin, Pin};
 
     use super::*;
 
