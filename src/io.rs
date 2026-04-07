@@ -73,13 +73,18 @@ impl<'io_op> Completion<'io_op> {
         entry
     }
 
-    fn complete(&mut self, result: i32) {
+    fn complete(&mut self, result: i32) -> bool {
         let res = if result < 0 {
-            Err(io::Error::from_raw_os_error(-result))
+            let errno = -result;
+            if errno == libc::EINTR {
+                return false;
+            }
+            Err(io::Error::from_raw_os_error(errno))
         } else {
             Ok(result)
         };
         unsafe { (self.trampoline)(self.context, self.callback, res) }
+        true
     }
 }
 
@@ -130,14 +135,24 @@ impl IO {
         }
     }
 
-    pub fn tick(&self) -> io::Result<()> {
+    pub fn drain(&self) -> io::Result<()> {
         let mut uring = self.uring.borrow_mut();
-        uring.submit_and_wait(1)?;
-        let mut cq = uring.completion();
-        while let Some(cqe) = cq.next() {
-            let user_data = cqe.user_data();
-            let comp = unsafe { &mut *(user_data as *mut Completion) };
-            comp.complete(cqe.result());
+        let (submitter, mut sq, mut cq) = uring.split();
+        while !sq.is_empty() {
+            submitter.submit_and_wait(sq.len())?;
+            cq.sync();
+            while let Some(cqe) = cq.next() {
+                let user_data = cqe.user_data();
+                let comp = unsafe { &mut *(user_data as *mut Completion) };
+                let ok = comp.complete(cqe.result());
+                if !ok {
+                    let mut entry = comp.prep();
+                    unsafe {
+                        sq.push(&mut entry).expect("TODO: handle full");
+                    }
+                }
+            }
+            sq.sync();
         }
         Ok(())
     }
@@ -257,7 +272,7 @@ mod tests {
         io.open(&mut fd, filename, flags, comp, |store, fd| {
             *store = Some(fd);
         });
-        io.tick()?;
+        io.drain()?;
         fd.expect("io should have finished")
     }
 
@@ -267,7 +282,7 @@ mod tests {
         io.read(&mut result, fd, buf, offset, comp, |store, result| {
             *store = Some(result);
         });
-        io.tick()?;
+        io.drain()?;
         result.expect("io should have finished")
     }
 
@@ -277,7 +292,7 @@ mod tests {
         io.close(&mut result, fd, comp, |holder, r| {
             *holder = Some(r);
         });
-        io.tick()?;
+        io.drain()?;
         result.expect("io should have finished")
     }
 

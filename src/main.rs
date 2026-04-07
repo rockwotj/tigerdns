@@ -61,5 +61,5 @@ fn main() {
     GLOBAL.lock();
 
     // Run!
-    io.tick().expect("io failure");
+    io.drain().expect("io failure");
 }

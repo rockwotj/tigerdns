@@ -29,6 +29,7 @@ tasks:
       - cmd: cargo +nightly test
 
   dev-container:
+    aliases: [dev, devc]
     platforms: [darwin]
     vars:
       CONTAINER_EXISTS:
