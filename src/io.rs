@@ -25,6 +25,11 @@ enum Operation<'io_op> {
         buf: Pin<&'io_op mut [u8]>,
         offset: u64,
     },
+    Write {
+        fd: Fd,
+        buf: Pin<&'io_op [u8]>,
+        offset: u64,
+    },
     Close {
         fd: Fd,
     },
@@ -48,6 +53,15 @@ enum Operation<'io_op> {
         raw_socket_data: [u8; 28],
         raw_socket_length: libc::socklen_t,
     },
+    Connect {
+        fd: Fd,
+        raw_socket_data: [u8; 28],
+        raw_socket_length: libc::socklen_t,
+    },
+    SetSocketOption {
+        fd: Fd,
+        opt: SocketOption,
+    },
 }
 
 #[repr(i32)]
@@ -65,9 +79,87 @@ pub enum SocketType {
     Raw = libc::SOCK_RAW,
 }
 
+#[repr(i32)]
+#[derive(Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum SocketOptionFlag {
+    Enable = 1,
+    Disable = 0,
+}
+
+#[derive(Copy, Clone)]
+pub enum SocketOption {
+    RecvBufferSize(i32),
+    SendBufferSize(i32),
+    ReuseAddress(SocketOptionFlag),
+    ReusePort(SocketOptionFlag),
+    KeepAlive(SocketOptionFlag),
+    Linger(libc::linger),
+    // TCP Specific options
+    TCPNoDelay(SocketOptionFlag),
+    TCPCork(SocketOptionFlag),
+    TCPKeepIdle(i32),
+    TCPKeepInterval(i32),
+    TCPKeepCount(i32),
+}
+
+impl SocketOption {
+    fn name(&self) -> i32 {
+        match *self {
+            SocketOption::RecvBufferSize(_) => libc::SO_RCVBUF,
+            SocketOption::SendBufferSize(_) => libc::SO_SNDBUF,
+            SocketOption::ReuseAddress(_) => libc::SO_REUSEADDR,
+            SocketOption::ReusePort(_) => libc::SO_REUSEPORT,
+            SocketOption::KeepAlive(_) => libc::SO_KEEPALIVE,
+            SocketOption::Linger(_) => libc::SO_LINGER,
+            SocketOption::TCPNoDelay(_) => libc::TCP_NODELAY,
+            SocketOption::TCPCork(_) => libc::TCP_CORK,
+            SocketOption::TCPKeepIdle(_) => libc::TCP_KEEPIDLE,
+            SocketOption::TCPKeepInterval(_) => libc::TCP_KEEPINTVL,
+            SocketOption::TCPKeepCount(_) => libc::TCP_KEEPCNT,
+        }
+    }
+    fn level(&self) -> i32 {
+        match *self {
+            SocketOption::RecvBufferSize(_)
+            | SocketOption::SendBufferSize(_)
+            | SocketOption::ReuseAddress(_)
+            | SocketOption::ReusePort(_)
+            | SocketOption::KeepAlive(_)
+            | SocketOption::Linger(_) => libc::SOL_SOCKET,
+            SocketOption::TCPNoDelay(_)
+            | SocketOption::TCPCork(_)
+            | SocketOption::TCPKeepIdle(_)
+            | SocketOption::TCPKeepInterval(_)
+            | SocketOption::TCPKeepCount(_) => libc::IPPROTO_TCP,
+        }
+    }
+    fn value(&self) -> *const libc::c_void {
+        match self {
+            SocketOption::RecvBufferSize(v) => v as *const _ as *const libc::c_void,
+            SocketOption::SendBufferSize(v) => v as *const _ as *const libc::c_void,
+            SocketOption::ReuseAddress(v) => v as *const _ as *const libc::c_void,
+            SocketOption::ReusePort(v) => v as *const _ as *const libc::c_void,
+            SocketOption::KeepAlive(v) => v as *const _ as *const libc::c_void,
+            SocketOption::Linger(linger) => linger as *const _ as *const libc::c_void,
+            SocketOption::TCPNoDelay(v) => v as *const _ as *const libc::c_void,
+            SocketOption::TCPCork(v) => v as *const _ as *const libc::c_void,
+            SocketOption::TCPKeepIdle(v) => v as *const _ as *const libc::c_void,
+            SocketOption::TCPKeepInterval(v) => v as *const _ as *const libc::c_void,
+            SocketOption::TCPKeepCount(v) => v as *const _ as *const libc::c_void,
+        }
+    }
+    fn value_len(&self) -> libc::socklen_t {
+        match *self {
+            SocketOption::Linger(_) => size_of::<libc::linger>() as libc::socklen_t,
+            _ => size_of::<i32>() as libc::socklen_t,
+        }
+    }
+}
+
 /// The opaque memory needed for the operation. The caller should have this allocated and manage the
 /// memory, but should not need to know the contents.
 pub struct Completion<'io_op> {
+    io: *mut IO,
     operation: Operation<'io_op>,
     context: *const c_void,
     callback: *const c_void,
@@ -79,6 +171,7 @@ pub struct Completion<'io_op> {
 impl<'a> Default for Completion<'a> {
     fn default() -> Self {
         Self {
+            io: Default::default(),
             operation: Operation::Uninitialized,
             context: Default::default(),
             callback: Default::default(),
@@ -87,6 +180,14 @@ impl<'a> Default for Completion<'a> {
             next: Default::default(),
         }
     }
+}
+
+fn buffer_limit(buf_len: usize) -> u32 {
+    // Linux limits how much may be written in a `pwrite()/pread()` call, which is `0x7ffff000` on
+    // both 64-bit and 32-bit systems, due to using a signed C int as the return value, as well as
+    // stuffing the errno codes into the last `4096` values.
+    const LIMIT: usize = 0x7ffff000;
+    std::cmp::min(LIMIT, buf_len) as u32
 }
 
 impl<'io_op> Completion<'io_op> {
@@ -102,7 +203,12 @@ impl<'io_op> Completion<'io_op> {
                     .build()
             }
             Operation::Read { fd, buf, offset } => {
-                opcode::Read::new(fd.clone(), buf.as_mut_ptr(), buf.len() as u32)
+                opcode::Read::new(fd.clone(), buf.as_mut_ptr(), buffer_limit(buf.len()))
+                    .offset(*offset)
+                    .build()
+            }
+            Operation::Write { fd, buf, offset } => {
+                opcode::Write::new(fd.clone(), buf.as_ptr(), buffer_limit(buf.len()))
                     .offset(*offset)
                     .build()
             }
@@ -130,6 +236,24 @@ impl<'io_op> Completion<'io_op> {
                 fd.clone(),
                 raw_socket_data.as_mut_ptr() as *mut libc::sockaddr,
                 raw_socket_length as *mut libc::socklen_t,
+            )
+            .build(),
+            Operation::Connect {
+                fd,
+                raw_socket_data,
+                raw_socket_length,
+            } => opcode::Connect::new(
+                fd.clone(),
+                raw_socket_data.as_mut_ptr() as *const libc::sockaddr,
+                *raw_socket_length,
+            )
+            .build(),
+            Operation::SetSocketOption { fd, opt } => opcode::SetSockOpt::new(
+                fd.clone(),
+                opt.level() as u32,
+                opt.name() as u32,
+                opt.value(),
+                opt.value_len(),
             )
             .build(),
         };
@@ -176,12 +300,12 @@ bitflags! {
     }
 }
 
-pub trait ContextPtr {
+pub trait IOContext {
     fn into_raw(self) -> *const c_void;
     unsafe fn from_raw(ptr: *const c_void) -> Self;
 }
 
-impl<'a, T> ContextPtr for &'a mut T {
+impl<'a, T> IOContext for &'a mut T {
     fn into_raw(self) -> *const c_void {
         self as *mut T as *const c_void
     }
@@ -191,7 +315,7 @@ impl<'a, T> ContextPtr for &'a mut T {
     }
 }
 
-impl<'a, T> ContextPtr for &'a T {
+impl<'a, T> IOContext for &'a T {
     fn into_raw(self) -> *const c_void {
         self as *const T as *const c_void
     }
@@ -232,7 +356,7 @@ impl IO {
     }
 
     /// Submits an asynchronous `open` operation.
-    pub fn open<'io_op, C: ContextPtr>(
+    pub fn open<'io_op, C: IOContext>(
         &self,
         context: C,
         pathname: Pin<&'io_op CStr>,
@@ -241,7 +365,7 @@ impl IO {
         callback: fn(C, io::Result<Fd>),
     ) {
         let completion = &mut *comp;
-        unsafe fn trampoline<C: ContextPtr>(comp: &mut Completion, result: io::Result<i32>) {
+        unsafe fn trampoline<C: IOContext>(comp: &mut Completion, result: io::Result<i32>) {
             let (context, callback) = unsafe {
                 let cb: fn(C, io::Result<Fd>) = std::mem::transmute(comp.callback);
                 (C::from_raw(comp.context), cb)
@@ -265,7 +389,7 @@ impl IO {
     /// Submits an asynchronous `read` operation.
     ///
     /// Reads up to `buf.len()` bytes from the file descriptor `fd` at the specified `offset`.
-    pub fn read<'io_op, C: ContextPtr>(
+    pub fn read<'io_op, C: IOContext>(
         &self,
         context: C,
         fd: Fd,
@@ -275,7 +399,7 @@ impl IO {
         callback: fn(C, io::Result<u64>),
     ) {
         let completion = &mut *comp;
-        unsafe fn trampoline<C: ContextPtr>(comp: &mut Completion, result: io::Result<i32>) {
+        unsafe fn trampoline<C: IOContext>(comp: &mut Completion, result: io::Result<i32>) {
             let (context, callback) = unsafe {
                 let cb: fn(C, io::Result<u64>) = std::mem::transmute(comp.callback);
                 (C::from_raw(comp.context), cb)
@@ -296,10 +420,41 @@ impl IO {
         }
     }
 
+    pub fn write<'io_op, C: IOContext>(
+        &self,
+        context: C,
+        fd: Fd,
+        buf: Pin<&'io_op [u8]>,
+        offset: u64,
+        mut comp: Pin<&mut Completion<'io_op>>,
+        callback: fn(C, io::Result<u64>),
+    ) {
+        let completion = &mut *comp;
+        unsafe fn trampoline<C: IOContext>(comp: &mut Completion, result: io::Result<i32>) {
+            let (context, callback) = unsafe {
+                let cb: fn(C, io::Result<u64>) = std::mem::transmute(comp.callback);
+                (C::from_raw(comp.context), cb)
+            };
+            callback(context, result.map(|amt| amt as u64))
+        }
+        completion.context = context.into_raw();
+        completion.operation = Operation::Write { fd, buf, offset };
+        completion.callback = callback as *const c_void;
+        completion.trampoline = trampoline::<C>;
+        let mut entry = comp.prep();
+        unsafe {
+            self.uring
+                .borrow_mut()
+                .submission()
+                .push(&mut entry)
+                .expect("TODO: handle full")
+        }
+    }
+
     /// Submits an asynchronous `close` operation.
     ///
     /// Deletes the descriptor from the per-process object reference table.
-    pub fn close<'io_op, C: ContextPtr>(
+    pub fn close<'io_op, C: IOContext>(
         &self,
         context: C,
         fd: Fd,
@@ -307,7 +462,7 @@ impl IO {
         callback: fn(C, io::Result<()>),
     ) {
         let completion = &mut *comp;
-        unsafe fn trampoline<C: ContextPtr>(comp: &mut Completion, result: io::Result<i32>) {
+        unsafe fn trampoline<C: IOContext>(comp: &mut Completion, result: io::Result<i32>) {
             let (context, callback) = unsafe {
                 let cb: fn(C, io::Result<()>) = std::mem::transmute(comp.callback);
                 (C::from_raw(comp.context), cb)
@@ -328,7 +483,7 @@ impl IO {
         }
     }
 
-    pub fn socket<'io_op, C: ContextPtr>(
+    pub fn socket<'io_op, C: IOContext>(
         &self,
         context: C,
         domain: SocketDomain,
@@ -337,7 +492,7 @@ impl IO {
         callback: fn(C, io::Result<Fd>),
     ) {
         let completion = &mut *comp;
-        unsafe fn trampoline<C: ContextPtr>(comp: &mut Completion, result: io::Result<i32>) {
+        unsafe fn trampoline<C: IOContext>(comp: &mut Completion, result: io::Result<i32>) {
             let (context, callback) = unsafe {
                 let cb: fn(C, io::Result<Fd>) = std::mem::transmute(comp.callback);
                 (C::from_raw(comp.context), cb)
@@ -361,7 +516,7 @@ impl IO {
         }
     }
 
-    pub fn bind<'io_op, C: ContextPtr>(
+    pub fn bind<'io_op, C: IOContext>(
         &self,
         context: C,
         fd: Fd,
@@ -370,7 +525,7 @@ impl IO {
         callback: fn(C, io::Result<()>),
     ) {
         let completion = &mut *comp;
-        unsafe fn trampoline<C: ContextPtr>(comp: &mut Completion, result: io::Result<i32>) {
+        unsafe fn trampoline<C: IOContext>(comp: &mut Completion, result: io::Result<i32>) {
             let (context, callback) = unsafe {
                 let cb: fn(C, io::Result<Fd>) = std::mem::transmute(comp.callback);
                 (C::from_raw(comp.context), cb)
@@ -378,44 +533,7 @@ impl IO {
             callback(context, result.map(|fd| Fd(fd)))
         }
         completion.context = context.into_raw();
-        // Wow this is really verbose to do a C memcpy :P
-        let mut raw: [u8; 28] = [0; 28];
-        fn copy_into<T: Sized>(src: &T, dst: &mut [u8; 28]) -> u32 {
-            let raw = unsafe {
-                std::slice::from_raw_parts((src as *const T) as *const u8, std::mem::size_of::<T>())
-            };
-            assert!(raw.len() <= dst.len(), "src must be smaller than dst");
-            for (i, &b) in raw.iter().enumerate() {
-                dst[i] = b;
-            }
-            raw.len() as u32
-        }
-        let raw_len: u32;
-        match addr {
-            std::net::SocketAddr::V4(v4) => {
-                let sa = libc::sockaddr_in {
-                    sin_family: libc::AF_INET as u16,
-                    sin_port: v4.port().to_be(),
-                    sin_addr: libc::in_addr {
-                        s_addr: v4.ip().to_bits(),
-                    },
-                    sin_zero: [0; 8],
-                };
-                raw_len = copy_into(&sa, &mut raw);
-            }
-            std::net::SocketAddr::V6(v6) => {
-                let sa = libc::sockaddr_in6 {
-                    sin6_family: libc::AF_INET6 as u16,
-                    sin6_port: v6.port().to_be(),
-                    sin6_flowinfo: v6.flowinfo(),
-                    sin6_addr: libc::in6_addr {
-                        s6_addr: v6.ip().octets(),
-                    },
-                    sin6_scope_id: v6.scope_id(),
-                };
-                raw_len = copy_into(&sa, &mut raw);
-            }
-        };
+        let (raw, raw_len) = create_socket_addr(addr);
         completion.operation = Operation::Bind {
             fd,
             raw_socket_data: raw,
@@ -433,7 +551,7 @@ impl IO {
         }
     }
 
-    pub fn listen<'io_op, C: ContextPtr>(
+    pub fn listen<'io_op, C: IOContext>(
         &self,
         context: C,
         fd: Fd,
@@ -442,7 +560,7 @@ impl IO {
         callback: fn(C, io::Result<()>),
     ) {
         let completion = &mut *comp;
-        unsafe fn trampoline<C: ContextPtr>(comp: &mut Completion, result: io::Result<i32>) {
+        unsafe fn trampoline<C: IOContext>(comp: &mut Completion, result: io::Result<i32>) {
             let (context, callback) = unsafe {
                 let cb: fn(C, io::Result<()>) = std::mem::transmute(comp.callback);
                 (C::from_raw(comp.context), cb)
@@ -466,7 +584,7 @@ impl IO {
         }
     }
 
-    pub fn accept<'io_op, C: ContextPtr>(
+    pub fn accept<'io_op, C: IOContext>(
         &self,
         context: C,
         fd: Fd,
@@ -474,7 +592,7 @@ impl IO {
         callback: fn(C, io::Result<(Fd, std::net::SocketAddr)>),
     ) {
         let completion = &mut *comp;
-        unsafe fn trampoline<C: ContextPtr>(comp: &mut Completion, result: io::Result<i32>) {
+        unsafe fn trampoline<C: IOContext>(comp: &mut Completion, result: io::Result<i32>) {
             let (context, callback) = unsafe {
                 let cb: fn(C, io::Result<(Fd, std::net::SocketAddr)>) =
                     std::mem::transmute(comp.callback);
@@ -532,7 +650,7 @@ impl IO {
         completion.operation = Operation::Accept {
             fd,
             raw_socket_data: Default::default(),
-            raw_socket_length: Default::default(),
+            raw_socket_length: 0,
         };
         completion.callback = callback as *const c_void;
         completion.trampoline = trampoline::<C>;
@@ -545,6 +663,111 @@ impl IO {
                 .expect("TODO: handle full")
         }
     }
+
+    pub fn connect<'io_op, C: IOContext>(
+        &self,
+        context: C,
+        fd: Fd,
+        addr: std::net::SocketAddr,
+        mut comp: Pin<&mut Completion<'io_op>>,
+        callback: fn(C, io::Result<()>),
+    ) {
+        let completion = &mut *comp;
+        unsafe fn trampoline<C: IOContext>(comp: &mut Completion, result: io::Result<i32>) {
+            let (context, callback) = unsafe {
+                let cb: fn(C, io::Result<()>) = std::mem::transmute(comp.callback);
+                (C::from_raw(comp.context), cb)
+            };
+            callback(context, result.map(|r| assert_eq!(r, 0)));
+        }
+        completion.context = context.into_raw();
+        let (raw, raw_len) = create_socket_addr(addr);
+        completion.operation = Operation::Connect {
+            fd,
+            raw_socket_data: raw,
+            raw_socket_length: raw_len,
+        };
+        completion.callback = callback as *const c_void;
+        completion.trampoline = trampoline::<C>;
+        let mut entry = comp.prep();
+        unsafe {
+            self.uring
+                .borrow_mut()
+                .submission()
+                .push(&mut entry)
+                .expect("TODO: handle full")
+        }
+    }
+
+    pub fn set_sock_opt<'io_op, C: IOContext>(
+        &self,
+        context: C,
+        fd: Fd,
+        opt: SocketOption,
+        mut comp: Pin<&mut Completion<'io_op>>,
+        callback: fn(C, io::Result<()>),
+    ) {
+        let completion = &mut *comp;
+        unsafe fn trampoline<C: IOContext>(comp: &mut Completion, result: io::Result<i32>) {
+            let (context, callback) = unsafe {
+                let cb: fn(C, io::Result<()>) = std::mem::transmute(comp.callback);
+                (C::from_raw(comp.context), cb)
+            };
+            callback(context, result.map(|r| assert_eq!(r, 0)));
+        }
+        completion.context = context.into_raw();
+        completion.operation = Operation::SetSocketOption { fd, opt };
+        completion.callback = callback as *const c_void;
+        completion.trampoline = trampoline::<C>;
+        let mut entry = comp.prep();
+        unsafe {
+            self.uring
+                .borrow_mut()
+                .submission()
+                .push(&mut entry)
+                .expect("TODO: handle full")
+        }
+    }
+}
+
+fn create_socket_addr(addr: std::net::SocketAddr) -> ([u8; 28], u32) {
+    // Wow this is really verbose to do a C memcpy :P
+    let mut raw: [u8; 28] = [0; 28];
+    fn copy_into<T: Sized>(src: &T, dst: &mut [u8; 28]) -> u32 {
+        let raw = unsafe {
+            std::slice::from_raw_parts((src as *const T) as *const u8, std::mem::size_of::<T>())
+        };
+        assert!(raw.len() <= dst.len(), "src must be smaller than dst");
+        dst[..raw.len()].copy_from_slice(raw);
+        raw.len() as u32
+    }
+    let raw_len: u32;
+    match addr {
+        std::net::SocketAddr::V4(v4) => {
+            let sa = libc::sockaddr_in {
+                sin_family: libc::AF_INET as u16,
+                sin_port: v4.port().to_be(),
+                sin_addr: libc::in_addr {
+                    s_addr: v4.ip().to_bits(),
+                },
+                sin_zero: [0; 8],
+            };
+            raw_len = copy_into(&sa, &mut raw);
+        }
+        std::net::SocketAddr::V6(v6) => {
+            let sa = libc::sockaddr_in6 {
+                sin6_family: libc::AF_INET6 as u16,
+                sin6_port: v6.port().to_be(),
+                sin6_flowinfo: v6.flowinfo(),
+                sin6_addr: libc::in6_addr {
+                    s6_addr: v6.ip().octets(),
+                },
+                sin6_scope_id: v6.scope_id(),
+            };
+            raw_len = copy_into(&sa, &mut raw);
+        }
+    };
+    (raw, raw_len)
 }
 
 #[cfg(test)]
@@ -573,10 +796,70 @@ mod tests {
         result.expect("io should have finished")
     }
 
+    fn write(io: &IO, fd: Fd, buf: Pin<&[u8]>, offset: u64) -> io::Result<u64> {
+        let comp = pin!(Default::default());
+        let mut result: Option<io::Result<u64>> = None;
+        io.write(&mut result, fd, buf, offset, comp, |store, result| {
+            *store = Some(result);
+        });
+        io.drain()?;
+        result.expect("io should have finished")
+    }
+
     fn close(io: &IO, fd: Fd) -> io::Result<()> {
         let comp = pin!(Default::default());
         let mut result: Option<io::Result<()>> = None;
         io.close(&mut result, fd, comp, |holder, r| {
+            *holder = Some(r);
+        });
+        io.drain()?;
+        result.expect("io should have finished")
+    }
+
+    fn bind(io: &IO, fd: Fd, addr: std::net::SocketAddr) -> io::Result<()> {
+        let comp = pin!(Default::default());
+        let mut result: Option<io::Result<()>> = None;
+        io.bind(&mut result, fd, addr, comp, |holder, r| {
+            *holder = Some(r);
+        });
+        io.drain()?;
+        result.expect("io should have finished")
+    }
+
+    fn listen(io: &IO, fd: Fd, backlog: i32) -> io::Result<()> {
+        let comp = pin!(Default::default());
+        let mut result: Option<io::Result<()>> = None;
+        io.listen(&mut result, fd, backlog, comp, |holder, r| {
+            *holder = Some(r);
+        });
+        io.drain()?;
+        result.expect("io should have finished")
+    }
+
+    fn socket(io: &IO, domain: SocketDomain, socket_type: SocketType) -> io::Result<Fd> {
+        let comp = pin!(Default::default());
+        let mut result: Option<io::Result<Fd>> = None;
+        io.socket(&mut result, domain, socket_type, comp, |holder, r| {
+            *holder = Some(r);
+        });
+        io.drain()?;
+        result.expect("io should have finished")
+    }
+
+    fn accept(io: &IO, fd: Fd) -> io::Result<(Fd, std::net::SocketAddr)> {
+        let comp = pin!(Default::default());
+        let mut result: Option<io::Result<(Fd, std::net::SocketAddr)>> = None;
+        io.accept(&mut result, fd, comp, |holder, r| {
+            *holder = Some(r);
+        });
+        io.drain()?;
+        result.expect("io should have finished")
+    }
+
+    fn connect(io: &IO, fd: Fd, addr: std::net::SocketAddr) -> io::Result<()> {
+        let comp = pin!(Default::default());
+        let mut result: Option<io::Result<()>> = None;
+        io.connect(&mut result, fd, addr, comp, |holder, r| {
             *holder = Some(r);
         });
         io.drain()?;
@@ -593,6 +876,28 @@ mod tests {
         let amt = read(&io, fd, pinned_buf, 0).expect("read should succeed");
         let expected = "Hello, world!\n";
         assert_eq!(amt, expected.len() as u64);
+        assert_eq!(&buf[0..amt as usize], expected.as_bytes());
+        close(&io, fd).expect("close should succeed");
+    }
+
+    #[test]
+    fn write_file() {
+        let io = IO::new();
+        let fd = open(
+            &io,
+            pin!(c"./src/testdata/bar.txt"),
+            OpenFlags::Create | OpenFlags::Truncate | OpenFlags::ReadWrite | OpenFlags::Direct,
+        )
+        .expect("open should succeed");
+        let mut buf: [u8; 4096] = [0; 4096];
+        let expected = "Hello, world!\n";
+        buf[..expected.len()].copy_from_slice(expected.as_bytes());
+        let pinned_buf = Pin::new(&buf[..expected.len()]);
+        let amt = write(&io, fd, pinned_buf, 0).expect("write should succeed");
+        assert_eq!(amt, expected.len() as u64);
+        buf = [0; 4096];
+        let pinned_buf = Pin::new(&mut buf[..]);
+        let amt = read(&io, fd, pinned_buf, 0).expect("read should succeed");
         assert_eq!(&buf[0..amt as usize], expected.as_bytes());
         close(&io, fd).expect("close should succeed");
     }
