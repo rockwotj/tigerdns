@@ -18,7 +18,6 @@ impl StartupAllocator {
         self.alloc_mu.lock().unwrap()
     }
     fn crash_with_backtrace(&self) -> ! {
-        let _guard = self.crash_mu.lock().unwrap();
         eprintln!(
             "allocation at: {}",
             std::backtrace::Backtrace::force_capture()
@@ -31,21 +30,30 @@ unsafe impl GlobalAlloc for StartupAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         match self.alloc_mu.try_lock() {
             Ok(_) => unsafe { System.alloc(layout) },
-            Err(_) => self.crash_with_backtrace(),
+            Err(_) => match self.crash_mu.try_lock() {
+                Ok(_) => self.crash_with_backtrace(),
+                Err(_) => unsafe { System.alloc(layout) },
+            },
         }
     }
 
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
         match self.alloc_mu.try_lock() {
             Ok(_) => unsafe { System.alloc_zeroed(layout) },
-            Err(_) => self.crash_with_backtrace(),
+            Err(_) => match self.crash_mu.try_lock() {
+                Ok(_) => self.crash_with_backtrace(),
+                Err(_) => unsafe { System.alloc_zeroed(layout) },
+            },
         }
     }
 
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         match self.alloc_mu.try_lock() {
             Ok(_) => unsafe { System.realloc(ptr, layout, new_size) },
-            Err(_) => self.crash_with_backtrace(),
+            Err(_) => match self.crash_mu.try_lock() {
+                Ok(_) => self.crash_with_backtrace(),
+                Err(_) => unsafe { System.realloc(ptr, layout, new_size) },
+            },
         }
     }
 
