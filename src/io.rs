@@ -5,7 +5,7 @@ use core::{
     pin::Pin,
     task::{Context, Poll, Waker},
 };
-use std::io;
+use std::{io, pin::pin};
 
 use bitflags::bitflags;
 use io_uring::{IoUring, squeue, types::Fd};
@@ -358,18 +358,13 @@ impl IO {
         &self,
         pathname: Pin<&'io_op CStr>,
         flags: OpenFlags,
-        mut comp: Pin<&mut Completion<'io_op>>,
     ) -> io::Result<Fd> {
-        unsafe {
-            let comp_mut = comp.as_mut().get_unchecked_mut();
-            comp_mut.operation = Operation::Open { pathname, flags };
-            comp_mut.waker = None;
-            comp_mut.result = None;
-        }
+        let mut comp = Completion::<'io_op>::default();
+        comp.operation = Operation::Open { pathname, flags };
 
         OpFuture {
             io: self,
-            comp,
+            comp: pin!(comp),
             submitted: false,
         }
         .await
@@ -381,22 +376,17 @@ impl IO {
         fd: Fd,
         buf: Pin<&'io_op mut [u8]>,
         offset: u64,
-        mut comp: Pin<&mut Completion<'io_op>>,
-    ) -> io::Result<u64> {
-        unsafe {
-            let comp_mut = comp.as_mut().get_unchecked_mut();
-            comp_mut.operation = Operation::Read { fd, buf, offset };
-            comp_mut.waker = None;
-            comp_mut.result = None;
-        }
+    ) -> io::Result<usize> {
+        let mut comp = Completion::<'io_op>::default();
+        comp.operation = Operation::Read { fd, buf, offset };
 
         OpFuture {
             io: self,
-            comp,
+            comp: pin!(comp),
             submitted: false,
         }
         .await
-        .map(|amt| amt as u64)
+        .map(|amt| amt as usize)
     }
 
     pub async fn write<'io_op>(
@@ -404,39 +394,26 @@ impl IO {
         fd: Fd,
         buf: Pin<&'io_op [u8]>,
         offset: u64,
-        mut comp: Pin<&mut Completion<'io_op>>,
-    ) -> io::Result<u64> {
-        unsafe {
-            let comp_mut = comp.as_mut().get_unchecked_mut();
-            comp_mut.operation = Operation::Write { fd, buf, offset };
-            comp_mut.waker = None;
-            comp_mut.result = None;
-        }
+    ) -> io::Result<usize> {
+        let mut comp = Completion::<'io_op>::default();
+        comp.operation = Operation::Write { fd, buf, offset };
 
         OpFuture {
             io: self,
-            comp,
+            comp: pin!(comp),
             submitted: false,
         }
         .await
-        .map(|amt| amt as u64)
+        .map(|amt| amt as usize)
     }
 
-    pub async fn close<'io_op>(
-        &self,
-        fd: Fd,
-        mut comp: Pin<&mut Completion<'io_op>>,
-    ) -> io::Result<()> {
-        unsafe {
-            let comp_mut = comp.as_mut().get_unchecked_mut();
-            comp_mut.operation = Operation::Close { fd };
-            comp_mut.waker = None;
-            comp_mut.result = None;
-        }
+    pub async fn close<'io_op>(&self, fd: Fd) -> io::Result<()> {
+        let mut comp = Completion::<'io_op>::default();
+        comp.operation = Operation::Close { fd };
 
         OpFuture {
             io: self,
-            comp,
+            comp: pin!(comp),
             submitted: false,
         }
         .await
@@ -447,99 +424,67 @@ impl IO {
         &self,
         domain: SocketDomain,
         socket_type: SocketType,
-        mut comp: Pin<&mut Completion<'io_op>>,
     ) -> io::Result<Fd> {
-        unsafe {
-            let comp_mut = comp.as_mut().get_unchecked_mut();
-            comp_mut.operation = Operation::Socket {
-                domain,
-                socket_type,
-            };
-            comp_mut.waker = None;
-            comp_mut.result = None;
-        }
+        let mut comp = Completion::<'io_op>::default();
+        comp.operation = Operation::Socket {
+            domain,
+            socket_type,
+        };
 
         OpFuture {
             io: self,
-            comp,
+            comp: pin!(comp),
             submitted: false,
         }
         .await
         .map(|fd| Fd(fd))
     }
 
-    pub async fn bind<'io_op>(
-        &self,
-        fd: Fd,
-        addr: std::net::SocketAddr,
-        mut comp: Pin<&mut Completion<'io_op>>,
-    ) -> io::Result<()> {
+    pub async fn bind<'io_op>(&self, fd: Fd, addr: std::net::SocketAddr) -> io::Result<()> {
         let (raw, raw_len) = create_socket_addr(addr);
-        unsafe {
-            let comp_mut = comp.as_mut().get_unchecked_mut();
-            comp_mut.operation = Operation::Bind {
-                fd,
-                raw_socket_data: raw,
-                raw_socket_len: raw_len,
-            };
-            comp_mut.waker = None;
-            comp_mut.result = None;
-        }
+        let mut comp = Completion::<'io_op>::default();
+        comp.operation = Operation::Bind {
+            fd,
+            raw_socket_data: raw,
+            raw_socket_len: raw_len,
+        };
 
         OpFuture {
             io: self,
-            comp,
+            comp: pin!(comp),
             submitted: false,
         }
         .await
         .map(|_| ())
     }
 
-    pub async fn listen<'io_op>(
-        &self,
-        fd: Fd,
-        backlog_length: i32,
-        mut comp: Pin<&mut Completion<'io_op>>,
-    ) -> io::Result<()> {
-        unsafe {
-            let comp_mut = comp.as_mut().get_unchecked_mut();
-            comp_mut.operation = Operation::Listen {
-                fd,
-                backlog: backlog_length,
-            };
-            comp_mut.waker = None;
-            comp_mut.result = None;
-        }
-
+    pub async fn listen<'io_op>(&self, fd: Fd, backlog_length: i32) -> io::Result<()> {
+        let mut comp = Completion::<'io_op>::default();
+        comp.operation = Operation::Listen {
+            fd,
+            backlog: backlog_length,
+        };
         OpFuture {
             io: self,
-            comp,
+            comp: pin!(comp),
             submitted: false,
         }
         .await
         .map(|_| ())
     }
 
-    pub async fn accept<'io_op>(
-        &self,
-        fd: Fd,
-        mut comp: Pin<&mut Completion<'io_op>>,
-    ) -> io::Result<(Fd, std::net::SocketAddr)> {
-        unsafe {
-            let comp_mut = comp.as_mut().get_unchecked_mut();
-            comp_mut.operation = Operation::Accept {
-                fd,
-                raw_socket_data: [0; 28],
-                raw_socket_length: 28, // Max size to ensure no truncation from kernel
-            };
-            comp_mut.waker = None;
-            comp_mut.result = None;
-        }
+    pub async fn accept<'io_op>(&self, fd: Fd) -> io::Result<(Fd, std::net::SocketAddr)> {
+        let mut comp = Completion::<'io_op>::default();
+        comp.operation = Operation::Accept {
+            fd,
+            raw_socket_data: [0; 28],
+            raw_socket_length: 28, // Max size to ensure no truncation from kernel
+        };
 
         // We re-borrow `comp` cleanly so we can inspect it after resolving.
         let result = OpFuture {
             io: self,
-            comp: comp.as_mut(),
+            comp: pin!(&mut comp),
             submitted: false,
         }
         .await?;
@@ -584,49 +529,31 @@ impl IO {
         Ok((fd_out, addr))
     }
 
-    pub async fn connect<'io_op>(
-        &self,
-        fd: Fd,
-        addr: std::net::SocketAddr,
-        mut comp: Pin<&mut Completion<'io_op>>,
-    ) -> io::Result<()> {
+    pub async fn connect<'io_op>(&self, fd: Fd, addr: std::net::SocketAddr) -> io::Result<()> {
+        let mut comp = Completion::<'io_op>::default();
         let (raw, raw_len) = create_socket_addr(addr);
-        unsafe {
-            let comp_mut = comp.as_mut().get_unchecked_mut();
-            comp_mut.operation = Operation::Connect {
-                fd,
-                raw_socket_data: raw,
-                raw_socket_length: raw_len,
-            };
-            comp_mut.waker = None;
-            comp_mut.result = None;
-        }
+        comp.operation = Operation::Connect {
+            fd,
+            raw_socket_data: raw,
+            raw_socket_length: raw_len,
+        };
 
         OpFuture {
             io: self,
-            comp,
+            comp: pin!(comp),
             submitted: false,
         }
         .await
         .map(|_| ())
     }
 
-    pub async fn set_sock_opt<'io_op>(
-        &self,
-        fd: Fd,
-        opt: SocketOption,
-        mut comp: Pin<&mut Completion<'io_op>>,
-    ) -> io::Result<()> {
-        unsafe {
-            let comp_mut = comp.as_mut().get_unchecked_mut();
-            comp_mut.operation = Operation::SetSocketOption { fd, opt };
-            comp_mut.waker = None;
-            comp_mut.result = None;
-        }
+    pub async fn set_sock_opt<'io_op>(&self, fd: Fd, opt: SocketOption) -> io::Result<()> {
+        let mut comp = Completion::<'io_op>::default();
+        comp.operation = Operation::SetSocketOption { fd, opt };
 
         OpFuture {
             io: self,
-            comp,
+            comp: pin!(comp),
             submitted: false,
         }
         .await
@@ -705,32 +632,23 @@ mod tests {
 
         // Use an async block and pin it locally
         let test_fut = pin!(async {
-            let mut open_comp = Completion::default();
             let fd = io
-                .open(
-                    pin!(c"./src/testdata/foo.txt"),
-                    OpenFlags::Readonly,
-                    pin!(&mut open_comp),
-                )
+                .open(pin!(c"./src/testdata/foo.txt"), OpenFlags::Readonly)
                 .await
                 .expect("open should succeed");
 
             let mut buf: [u8; 4096] = [0; 4096];
-            let mut read_comp = Completion::default();
 
             let amt = io
-                .read(fd, Pin::new(&mut buf[..]), 0, pin!(&mut read_comp))
+                .read(fd, Pin::new(&mut buf[..]), 0)
                 .await
                 .expect("read should succeed");
 
             let expected = "Hello, world!\n";
-            assert_eq!(amt, expected.len() as u64);
+            assert_eq!(amt, expected.len());
             assert_eq!(&buf[0..amt as usize], expected.as_bytes());
 
-            let mut close_comp = Completion::default();
-            io.close(fd, pin!(&mut close_comp))
-                .await
-                .expect("close should succeed");
+            io.close(fd).await.expect("close should succeed");
         });
 
         block_on(&io, test_fut);
@@ -742,7 +660,6 @@ mod tests {
         let io = IO::new();
 
         let test_fut = pin!(async {
-            let mut open_comp = Completion::default();
             let fd = io
                 .open(
                     pin!(c"./src/testdata/bar.txt"),
@@ -750,7 +667,6 @@ mod tests {
                         | OpenFlags::Truncate
                         | OpenFlags::ReadWrite
                         | OpenFlags::Direct,
-                    pin!(&mut open_comp),
                 )
                 .await
                 .expect("open should succeed");
@@ -759,32 +675,22 @@ mod tests {
             let expected = "Hello, world!\n";
             buf[..expected.len()].copy_from_slice(expected.as_bytes());
 
-            let mut write_comp = Completion::default();
             let amt = io
-                .write(
-                    fd,
-                    Pin::new(&buf[..expected.len()]),
-                    0,
-                    pin!(&mut write_comp),
-                )
+                .write(fd, Pin::new(&buf[..expected.len()]), 0)
                 .await
                 .expect("write should succeed");
 
-            assert_eq!(amt, expected.len() as u64);
+            assert_eq!(amt, expected.len());
 
             let mut read_buf = [0; 4096];
-            let mut read_comp = Completion::default();
             let amt = io
-                .read(fd, Pin::new(&mut read_buf[..]), 0, pin!(&mut read_comp))
+                .read(fd, Pin::new(&mut read_buf[..]), 0)
                 .await
                 .expect("read should succeed");
 
             assert_eq!(&read_buf[0..amt as usize], expected.as_bytes());
 
-            let mut close_comp = Completion::default();
-            io.close(fd, pin!(&mut close_comp))
-                .await
-                .expect("close should succeed");
+            io.close(fd).await.expect("close should succeed");
         });
 
         block_on(&io, test_fut);
@@ -797,37 +703,23 @@ mod tests {
 
         let test_fut = pin!(async {
             // 1. Create a TCP Socket
-            let mut sock_comp = Completion::default();
             let fd = io
-                .socket(SocketDomain::INet, SocketType::Stream, pin!(&mut sock_comp))
+                .socket(SocketDomain::INet, SocketType::Stream)
                 .await
                 .expect("socket creation failed");
 
             // 2. Set Socket Options (TCP_NODELAY)
-            let mut opt_comp = Completion::default();
-            io.set_sock_opt(
-                fd,
-                SocketOption::TCPNoDelay(SocketOptionFlag::Enable),
-                pin!(&mut opt_comp),
-            )
-            .await
-            .expect("set_sock_opt failed");
+            io.set_sock_opt(fd, SocketOption::TCPNoDelay(SocketOptionFlag::Enable))
+                .await
+                .expect("set_sock_opt failed");
 
             // 3. Set Reuse Address
-            let mut reuse_comp = Completion::default();
-            io.set_sock_opt(
-                fd,
-                SocketOption::ReuseAddress(SocketOptionFlag::Enable),
-                pin!(&mut reuse_comp),
-            )
-            .await
-            .expect("set_reuse_addr failed");
+            io.set_sock_opt(fd, SocketOption::ReuseAddress(SocketOptionFlag::Enable))
+                .await
+                .expect("set_reuse_addr failed");
 
             // 4. Close
-            let mut close_comp = Completion::default();
-            io.close(fd, pin!(&mut close_comp))
-                .await
-                .expect("close failed");
+            io.close(fd).await.expect("close failed");
         });
 
         block_on(&io, test_fut);
@@ -839,29 +731,19 @@ mod tests {
         let io = IO::new();
 
         let test_fut = pin!(async {
-            let mut sock_comp = Completion::default();
             let fd = io
-                .socket(SocketDomain::INet, SocketType::Stream, pin!(&mut sock_comp))
+                .socket(SocketDomain::INet, SocketType::Stream)
                 .await
                 .expect("socket failed");
 
             // Bind to an ephemeral port on localhost
             let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
-            let mut bind_comp = Completion::default();
-            io.bind(fd, addr, pin!(&mut bind_comp))
-                .await
-                .expect("bind failed");
+            io.bind(fd, addr).await.expect("bind failed");
 
             // Start listening
-            let mut listen_comp = Completion::default();
-            io.listen(fd, 128, pin!(&mut listen_comp))
-                .await
-                .expect("listen failed");
+            io.listen(fd, 128).await.expect("listen failed");
 
-            let mut close_comp = Completion::default();
-            io.close(fd, pin!(&mut close_comp))
-                .await
-                .expect("close failed");
+            io.close(fd).await.expect("close failed");
         });
 
         block_on(&io, test_fut);
@@ -874,59 +756,36 @@ mod tests {
 
         let test_fut = pin!(async {
             // --- SERVER SETUP ---
-            let mut srv_sock_comp = Completion::default();
             let l_fd = io
-                .socket(
-                    SocketDomain::INet,
-                    SocketType::Stream,
-                    pin!(&mut srv_sock_comp),
-                )
+                .socket(SocketDomain::INet, SocketType::Stream)
                 .await
                 .expect("server socket failed");
 
-            let mut reuse_comp = Completion::default();
-            io.set_sock_opt(
-                l_fd,
-                SocketOption::ReuseAddress(SocketOptionFlag::Enable),
-                pin!(&mut reuse_comp),
-            )
-            .await
-            .unwrap();
+            io.set_sock_opt(l_fd, SocketOption::ReuseAddress(SocketOptionFlag::Enable))
+                .await
+                .unwrap();
 
             // Bind to a specific local port
             let srv_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9999);
-            let mut bind_comp = Completion::default();
-            io.bind(l_fd, srv_addr, pin!(&mut bind_comp))
-                .await
-                .expect("bind failed");
+            io.bind(l_fd, srv_addr).await.expect("bind failed");
 
-            let mut listen_comp = Completion::default();
-            io.listen(l_fd, 5, pin!(&mut listen_comp))
-                .await
-                .expect("listen failed");
+            io.listen(l_fd, 5).await.expect("listen failed");
 
             // --- CLIENT CONNECT ---
             // Note: In a real app, you'd spawn a task. Here we just chain the logic.
             // Since io_uring is async, the 'accept' can be pending while we 'connect'.
 
-            let mut cl_sock_comp = Completion::default();
             let c_fd = io
-                .socket(
-                    SocketDomain::INet,
-                    SocketType::Stream,
-                    pin!(&mut cl_sock_comp),
-                )
+                .socket(SocketDomain::INet, SocketType::Stream)
                 .await
                 .expect("client socket failed");
 
             // Since we are single-threaded, we have to be careful with the order.
             // We initiate the connect.
-            let conn_comp = pin!(Completion::default());
-            let accept_comp = pin!(Completion::default());
 
             // We use a manual poll-loop for the handshake to avoid blocking on one.
-            let connect_fut = io.connect(c_fd, srv_addr, conn_comp);
-            let accept_fut = io.accept(l_fd, accept_comp);
+            let connect_fut = io.connect(c_fd, srv_addr);
+            let accept_fut = io.accept(l_fd);
 
             // Logic: The connect will complete once the kernel processes the SYN/ACK.
             // The accept will complete once the handshake is done.
@@ -939,12 +798,9 @@ mod tests {
             let (connected_fd, _client_addr) = accept_res.expect("server accept failed");
 
             // Clean up
-            let mut c1 = Completion::default();
-            let mut c2 = Completion::default();
-            let mut c3 = Completion::default();
-            io.close(c_fd, pin!(&mut c1)).await.unwrap();
-            io.close(connected_fd, pin!(&mut c2)).await.unwrap();
-            io.close(l_fd, pin!(&mut c3)).await.unwrap();
+            io.close(c_fd).await.unwrap();
+            io.close(connected_fd).await.unwrap();
+            io.close(l_fd).await.unwrap();
         });
 
         block_on(&io, test_fut);
